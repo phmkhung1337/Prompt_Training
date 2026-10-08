@@ -20,6 +20,7 @@ def _start_new_chat() -> None:
     st.session_state.last_error = None
     st.session_state.pending_question = None
     st.session_state.draft_question = ""
+    st.session_state.response_cache = {}
 
 
 def _queue_question(question: str) -> None:
@@ -51,6 +52,7 @@ def _init_state() -> None:
         "last_error": None,
         "pending_question": None,
         "draft_question": "",
+        "response_cache": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -78,7 +80,7 @@ def _handle_question(question: str) -> None:
 
     try:
         with st.spinner("Đang trả lời…"):
-            answer = llm_client.ask_student(question, history)
+            answer = llm_client.ask_student(question, history, response_cache=st.session_state.response_cache)
     except llm_client.HelpdeskError as exc:
         st.session_state.failed_question = question
         st.session_state.last_error = str(exc)

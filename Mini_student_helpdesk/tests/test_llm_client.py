@@ -17,7 +17,7 @@ class LLMClientTests(unittest.TestCase):
         self.client.responses.create.return_value = SimpleNamespace(output_text="Câu trả lời từ mock.")
         self.env = patch.dict(
             "os.environ",
-            {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"},
+            {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"},
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -34,7 +34,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request["model"], "test-model")
         self.assertEqual(request["input"][-1]["content"], "Em xem học phí ở đâu?")
         self.assertIn("FAQ Student Helpdesk", request["instructions"])
-        self.assertEqual(request["max_output_tokens"], llm_client.MAX_OUTPUT_TOKENS)
+        self.assertEqual(request["max_output_tokens"], llm_client.SINGLE_TOPIC_OUTPUT_TOKENS)
+        self.assertNotIn("### 5.", request["instructions"])
 
     def test_prompt_has_unknown_answer_and_out_of_scope_rules(self) -> None:
         instructions = llm_client._build_instructions()
@@ -104,6 +105,84 @@ class LLMClientTests(unittest.TestCase):
         self.client.responses.create.return_value = SimpleNamespace(output_text="  ")
         with self.assertRaisesRegex(llm_client.HelpdeskError, "nội dung rỗng"):
             llm_client.ask_student("Câu hỏi", [])
+
+    def test_all_faq_questions_keep_their_entire_section(self) -> None:
+        import re
+        faq = llm_client.load_faq()
+        for heading in re.findall(r"(?m)^### (.+)$", faq):
+            with self.subTest(question=heading):
+                selected, _ = llm_client.select_faq(heading, [])
+                self.assertIn("### " + heading, selected)
+
+    def test_ambiguous_and_follow_up_keep_context_and_full_faq(self) -> None:
+        history = [{"role": "user", "content": "Em đăng ký môn ở đâu?"},
+                   {"role": "assistant", "content": "Mở mục đăng ký học phần."}]
+        self.assertEqual(llm_client.select_history("Còn hạn thì sao?", history), history)
+        faq, limit = llm_client.select_faq("Còn hạn thì sao?", history)
+        self.assertEqual(faq, llm_client.load_faq())
+        self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
+
+    def test_only_unrelated_pairs_are_dropped_for_independent_lookup(self) -> None:
+        history = [{"role": "user", "content": "Em đăng ký môn ở đâu?"},
+                   {"role": "assistant", "content": "Cổng sinh viên."},
+                   {"role": "user", "content": "Em đã đóng học phí rồi."},
+                   {"role": "assistant", "content": "Giữ lại biên nhận."}]
+        self.assertEqual(llm_client.select_history("Em xem học phí ở đâu?", history), history[2:])
+        self.assertEqual(llm_client.select_history("Còn học phí đó xem ở đâu?", history), history)
+
+    def test_multi_topic_keeps_both_sections_and_output_budget(self) -> None:
+        faq, limit = llm_client.select_faq("Học phí và đăng ký môn ở đâu?", [])
+        self.assertIn("### 1.", faq)
+        self.assertIn("### 5.", faq)
+        self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
+
+    def test_unknown_faq_layout_falls_back_to_full_document(self) -> None:
+        with patch.object(llm_client, "load_faq", return_value="# FAQ\n## Quy định mới\nNội dung mới"):
+            faq, limit = llm_client.select_faq("Em xem học phí ở đâu?", [])
+        self.assertIn("Nội dung mới", faq)
+        self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
+
+    def test_identical_request_uses_cache_but_changed_context_does_not(self) -> None:
+        cache = {}
+        llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
+        llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
+        self.assertEqual(self.client.responses.create.call_count, 1)
+        llm_client.ask_student("Còn hạn thì sao?", [{"role": "user", "content": "Câu trước"}], response_cache=cache)
+        self.assertEqual(self.client.responses.create.call_count, 2)
+        with patch.object(llm_client, "load_system_prompt", return_value="Prompt đã thay đổi"):
+            llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
+        self.assertEqual(self.client.responses.create.call_count, 3)
+
+    def test_expired_cache_calls_api_again(self) -> None:
+        cache = {}
+        llm_client.ask_student("Câu hỏi", [], response_cache=cache)
+        with patch.object(llm_client.time, "monotonic", return_value=next(iter(cache.values()))[0] + 301):
+            llm_client.ask_student("Câu hỏi", [], response_cache=cache)
+        self.assertEqual(self.client.responses.create.call_count, 2)
+
+    def test_repeated_standalone_lookup_hits_cache_without_second_call(self) -> None:
+        cache = {}
+        question = "Em xem học phí ở đâu?"
+        answer = llm_client.ask_student(question, [], response_cache=cache)
+        history = [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+        self.assertEqual(llm_client.ask_student(question, history, response_cache=cache), answer)
+        self.client.responses.create.assert_called_once()
+
+    def test_incomplete_answer_is_not_cached(self) -> None:
+        cache = {}
+        self.client.responses.create.return_value = SimpleNamespace(status="incomplete", output_text="Câu bị cắt")
+        with self.assertRaisesRegex(llm_client.HelpdeskError, "chưa hoàn thành"):
+            llm_client.ask_student("Câu hỏi", [], response_cache=cache)
+        self.assertEqual(cache, {})
+
+    def test_document_cache_reloads_after_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            faq = Path(folder) / "faq.md"
+            faq.write_text("Nội dung đầu", encoding="utf-8")
+            with patch.object(llm_client, "FAQ_PATH", faq):
+                self.assertEqual(llm_client.load_faq(), "Nội dung đầu")
+                faq.write_text("Nội dung đã cập nhật dài hơn", encoding="utf-8")
+                self.assertEqual(llm_client.load_faq(), "Nội dung đã cập nhật dài hơn")
 
 
 if __name__ == "__main__":
