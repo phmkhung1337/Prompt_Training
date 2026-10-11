@@ -1,0 +1,7 @@
+# Direct dependencies tested with this project; install in a fresh virtualenv.
+openai==3.26.1
+python-dotenv==1.2.4
+streamlit==1.65.0
+httpx==0.28.1
+pydantic==2.14.0
+sentence-transformers==5.7.0

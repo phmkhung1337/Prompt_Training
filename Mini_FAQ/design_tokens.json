@@ -1,0 +1,74 @@
+{
+  "source": "https://www.figma.com/resource-library/design-token-architecture/",
+  "primitives": {
+    "color": {
+      "navy-950": "#080A22",
+      "navy-900": "#10132F",
+      "navy-800": "#171C3B",
+      "navy-700": "#232849",
+      "navy-600": "#343B63",
+      "indigo-700": "#263EB5",
+      "indigo-600": "#4338A8",
+      "indigo-500": "#5547BD",
+      "indigo-300": "#B7BEFF",
+      "indigo-200": "#D1D5FF",
+      "violet-600": "#7550B3",
+      "violet-300": "#C4AFF0",
+      "lavender-100": "#EEEAF9",
+      "lavender-50": "#F7F5FC",
+      "slate-950": "#23203E",
+      "slate-600": "#655E7A",
+      "slate-400": "#B7B8D2",
+      "slate-200": "#DED9ED",
+      "white": "#FFFFFF",
+      "white-soft": "#F1EFFB",
+      "glow-dark": "rgba(88, 59, 183, 0.16)",
+      "glow-light": "rgba(139, 106, 213, 0.08)"
+    },
+    "space": {
+      "1": "4px", "2": "8px", "3": "12px", "4": "16px",
+      "5": "20px", "6": "24px", "8": "32px", "10": "40px",
+      "12": "48px", "16": "64px"
+    },
+    "radius": {"sm": "8px", "button": "12px", "card": "20px", "composer": "24px", "pill": "999px"},
+    "font": {
+      "family": "'Segoe UI', Arial, sans-serif",
+      "caption": "12px", "body": "14px", "input": "16px",
+      "heading": "24px", "hero": "42px", "hero-mobile": "30px",
+      "regular": "400", "medium": "500", "semibold": "600",
+      "line-height": "1.6"
+    }
+  },
+  "semantic": {
+    "Tối": {
+      "scheme": "dark",
+      "bg": "color.navy-950", "surface": "color.navy-900",
+      "elevated": "color.navy-800", "hover": "color.navy-700",
+      "border": "color.navy-600", "text": "color.white-soft",
+      "muted": "color.slate-400", "blue": "color.indigo-300",
+      "primary-hover": "color.indigo-200", "on-primary": "color.navy-950",
+      "accent": "color.violet-300", "selection": "color.navy-600",
+      "gradient-start": "color.indigo-700", "gradient-end": "color.violet-600",
+      "on-gradient": "color.white", "glow": "color.glow-dark"
+    },
+    "Sáng": {
+      "scheme": "light",
+      "bg": "color.lavender-50", "surface": "color.white",
+      "elevated": "color.white", "hover": "color.lavender-100",
+      "border": "color.slate-200", "text": "color.slate-950",
+      "muted": "color.slate-600", "blue": "color.indigo-500",
+      "primary-hover": "color.indigo-600", "on-primary": "color.white",
+      "accent": "color.violet-600", "selection": "color.lavender-100",
+      "gradient-start": "color.indigo-700", "gradient-end": "color.violet-600",
+      "on-gradient": "color.white", "glow": "color.glow-light"
+    }
+  },
+  "components": {
+    "button-radius": "radius.button",
+    "card-radius": "radius.card",
+    "composer-radius": "radius.composer",
+    "chip-radius": "radius.pill",
+    "content-gap": "space.6",
+    "control-gap": "space.3"
+  }
+}
