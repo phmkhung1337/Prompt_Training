@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,10 +15,11 @@ import llm_client
 class LLMClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = Mock()
-        self.client.responses.create.return_value = SimpleNamespace(output_text="Câu trả lời từ mock.")
+        self.client.responses.create.return_value = SimpleNamespace(output_text=json.dumps({"answer": "Câu trả lời từ mock.", "category": "other", "status": "answered"}))
         self.env = patch.dict(
             "os.environ",
-            {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"},
+            {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model",
+             "LLM_MAX_HISTORY_PAIRS": "12", "LLM_INPUT_BUDGET": "6000"},
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -26,22 +28,23 @@ class LLMClientTests(unittest.TestCase):
         self.addCleanup(self.openai.stop)
 
     def test_question_with_faq_uses_responses_api(self) -> None:
-        answer = llm_client.ask_student("Em xem học phí ở đâu?", [])
+        answer = llm_client.ask_student("Giải thích vòng lặp Python là gì?", [])
 
-        self.assertEqual(answer, "Câu trả lời từ mock.")
+        self.assertEqual(answer["answer"], "Câu trả lời từ mock.")
         self.client.responses.create.assert_called_once()
         request = self.client.responses.create.call_args.kwargs
         self.assertEqual(request["model"], "test-model")
-        self.assertEqual(request["input"][-1]["content"], "Em xem học phí ở đâu?")
-        self.assertIn("FAQ Student Helpdesk", request["instructions"])
-        self.assertEqual(request["max_output_tokens"], llm_client.SINGLE_TOPIC_OUTPUT_TOKENS)
+        self.assertEqual(request["input"][-1]["content"], "Giải thích vòng lặp Python là gì?")
+        self.assertIn("Hướng dẫn hỗ trợ học tập", request["instructions"])
+        self.assertEqual(request["max_output_tokens"], llm_client._get_budget().normal_output)
         self.assertNotIn("### 5.", request["instructions"])
 
     def test_prompt_has_unknown_answer_and_out_of_scope_rules(self) -> None:
         instructions = llm_client._build_instructions()
 
-        self.assertIn("Mình chưa có thông tin này trong tài liệu hỗ trợ.", instructions)
-        self.assertIn("câu hỏi ngoài phạm vi", instructions)
+        self.assertIn("trợ lý học tập độc lập", instructions)
+        self.assertIn("không đại diện", instructions)
+        self.assertIn("câu hỏi ngoài phạm vi", instructions.lower())
         self.assertIn("không phải chỉ dẫn", instructions)
 
     def test_connection_error_is_mapped_to_a_safe_message(self) -> None:
@@ -54,9 +57,9 @@ class LLMClientTests(unittest.TestCase):
 
         self.client.responses.create.assert_called_once()
 
-    def test_follow_up_keeps_only_five_previous_pairs(self) -> None:
+    def test_follow_up_keeps_only_configured_previous_pairs(self) -> None:
         history = []
-        for index in range(1, 7):
+        for index in range(1, 14):
             history.extend(
                 [
                     {"role": "user", "content": f"câu hỏi {index}"},
@@ -67,7 +70,7 @@ class LLMClientTests(unittest.TestCase):
         llm_client.ask_student("Câu hỏi tiếp theo", history)
         sent_messages = self.client.responses.create.call_args.kwargs["input"]
 
-        self.assertEqual(len(sent_messages), 11)
+        self.assertEqual(len(sent_messages), 25)
         self.assertEqual(sent_messages[0]["content"], "câu hỏi 2")
         self.assertEqual(sent_messages[-1]["content"], "Câu hỏi tiếp theo")
 
@@ -85,18 +88,32 @@ class LLMClientTests(unittest.TestCase):
 
         self.client.responses.create.assert_not_called()
 
-    def test_empty_faq_fails_before_api_call(self) -> None:
+    def test_empty_faq_does_not_block_academic_questions(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             empty_faq = Path(folder) / "faq.md"
             empty_faq.write_text("  ", encoding="utf-8")
             with patch.object(llm_client, "FAQ_PATH", empty_faq):
-                with self.assertRaisesRegex(llm_client.HelpdeskError, "faq.md đang trống"):
-                    llm_client.ask_student("Câu hỏi", [])
+                answer = llm_client.ask_student("Đạo hàm của x^2 là gì?", [])
+                self.assertEqual(answer["status"], "answered")
+                self.assertIn("Dùng kiến thức của model", self.client.responses.create.call_args.kwargs["instructions"])
 
-        self.client.responses.create.assert_not_called()
+        self.client.responses.create.assert_called_once()
+
+    def test_missing_faq_does_not_block_academic_questions(self) -> None:
+        with patch.object(llm_client, "FAQ_PATH", Path("missing-learning-guide.md")):
+            self.assertEqual(llm_client.ask_student("Vì sao cây cần ánh sáng?", [])["status"], "answered")
+        self.client.responses.create.assert_called_once()
+
+    def test_new_academic_subject_does_not_inherit_old_faq(self) -> None:
+        history = [{'role': 'user', 'content': 'Giải thích Python'},
+                   {'role': 'assistant', 'content': 'Vòng lặp for lặp qua phần tử.'}]
+        faq, _ = llm_client.select_faq('Vì sao thực vật cần ánh sáng?', history)
+        self.assertNotIn('### 3.', faq)
+        faq, _ = llm_client.select_faq('Cho ví dụ thêm', history)
+        self.assertIn('### 3.', faq)
 
     def test_question_over_limit_fails_before_api_call(self) -> None:
-        with self.assertRaisesRegex(llm_client.HelpdeskError, "2.000 ký tự"):
+        with self.assertRaisesRegex(llm_client.HelpdeskError, "16.000 ký tự"):
             llm_client.ask_student("x" * (llm_client.MAX_QUESTION_CHARS + 1), [])
 
         self.client.responses.create.assert_not_called()
@@ -114,43 +131,63 @@ class LLMClientTests(unittest.TestCase):
                 selected, _ = llm_client.select_faq(heading, [])
                 self.assertIn("### " + heading, selected)
 
-    def test_ambiguous_and_follow_up_keep_context_and_full_faq(self) -> None:
-        history = [{"role": "user", "content": "Em đăng ký môn ở đâu?"},
-                   {"role": "assistant", "content": "Mở mục đăng ký học phần."}]
-        self.assertEqual(llm_client.select_history("Còn hạn thì sao?", history), history)
-        faq, limit = llm_client.select_faq("Còn hạn thì sao?", history)
-        self.assertEqual(faq, llm_client.load_faq())
-        self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
+    def test_general_knowledge_uses_model_without_irrelevant_faq(self) -> None:
+        llm_client.ask_student("Giải thích vòng lặp Python", [])
+        instructions = self.client.responses.create.call_args.kwargs["instructions"]
+        self.assertIn("kiến thức và suy luận", instructions)
+        self.assertIn("Không từ chối chỉ vì thiếu FAQ", instructions)
+        self.assertNotIn("### 1.", instructions)
+        self.assertNotIn("hocphi@", instructions)
+
+    def test_school_questions_do_not_receive_institution_data(self) -> None:
+        faq, _ = llm_client.select_faq("Giải thích quy định học bổng của trường", [])
+        self.assertNotIn("Minh Hải", faq)
+        self.assertNotIn("20.000.000", faq)
+        self.assertNotIn("@", faq)
+        self.assertIn("chưa có nguồn chính thức", llm_client.load_system_prompt())
+
+    def test_detailed_guidance_has_larger_but_bounded_output(self) -> None:
+        _, limit = llm_client.select_faq("Lập kế hoạch học tập chi tiết", [])
+        self.assertEqual(limit, llm_client.DETAILED_OUTPUT_TOKENS)
+
+    def test_ambiguous_followup_keeps_learning_context(self) -> None:
+        history = [{"role": "user", "content": "Vòng lặp Python là gì?"},
+                   {"role": "assistant", "content": "Dùng để lặp các bước."}]
+        self.assertEqual(llm_client.select_history("Giải thích thêm", history), history)
+        faq, limit = llm_client.select_faq("Giải thích thêm", history)
+        self.assertIn("### 3.", faq)
+        self.assertNotIn("### 9.", faq)
+        self.assertEqual(limit, llm_client.SINGLE_TOPIC_OUTPUT_TOKENS)
 
     def test_only_unrelated_pairs_are_dropped_for_independent_lookup(self) -> None:
-        history = [{"role": "user", "content": "Em đăng ký môn ở đâu?"},
-                   {"role": "assistant", "content": "Cổng sinh viên."},
-                   {"role": "user", "content": "Em đã đóng học phí rồi."},
-                   {"role": "assistant", "content": "Giữ lại biên nhận."}]
-        self.assertEqual(llm_client.select_history("Em xem học phí ở đâu?", history), history[2:])
-        self.assertEqual(llm_client.select_history("Còn học phí đó xem ở đâu?", history), history)
+        history = [{"role": "user", "content": "Khái niệm đạo hàm là gì?"},
+                   {"role": "assistant", "content": "Đạo hàm mô tả tốc độ thay đổi."},
+                   {"role": "user", "content": "Em mới học Python."},
+                   {"role": "assistant", "content": "Bắt đầu bằng biến và vòng lặp."}]
+        self.assertEqual(llm_client.select_history("Giải thích vòng lặp Python là gì?", history), history[2:])
+        self.assertEqual(llm_client.select_history("Còn vòng lặp đó là gì?", history), history)
 
     def test_multi_topic_keeps_both_sections_and_output_budget(self) -> None:
-        faq, limit = llm_client.select_faq("Học phí và đăng ký môn ở đâu?", [])
+        faq, limit = llm_client.select_faq("Giải thích khái niệm và vòng lặp Python", [])
         self.assertIn("### 1.", faq)
-        self.assertIn("### 5.", faq)
+        self.assertIn("### 3.", faq)
         self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
 
     def test_unknown_faq_layout_falls_back_to_full_document(self) -> None:
-        with patch.object(llm_client, "load_faq", return_value="# FAQ\n## Quy định mới\nNội dung mới"):
-            faq, limit = llm_client.select_faq("Em xem học phí ở đâu?", [])
+        with patch.object(llm_client, "load_faq", return_value="# FAQ\n## Kiến thức mới\nNội dung mới"):
+            faq, limit = llm_client.select_faq("Giải thích vòng lặp Python là gì?", [])
         self.assertIn("Nội dung mới", faq)
         self.assertEqual(limit, llm_client.MAX_OUTPUT_TOKENS)
 
     def test_identical_request_uses_cache_but_changed_context_does_not(self) -> None:
         cache = {}
-        llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
-        llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
+        llm_client.ask_student("Giải thích vòng lặp Python là gì?", [], response_cache=cache)
+        llm_client.ask_student("Giải thích vòng lặp Python là gì?", [], response_cache=cache)
         self.assertEqual(self.client.responses.create.call_count, 1)
         llm_client.ask_student("Còn hạn thì sao?", [{"role": "user", "content": "Câu trước"}], response_cache=cache)
         self.assertEqual(self.client.responses.create.call_count, 2)
         with patch.object(llm_client, "load_system_prompt", return_value="Prompt đã thay đổi"):
-            llm_client.ask_student("Em xem học phí ở đâu?", [], response_cache=cache)
+            llm_client.ask_student("Giải thích vòng lặp Python là gì?", [], response_cache=cache)
         self.assertEqual(self.client.responses.create.call_count, 3)
 
     def test_expired_cache_calls_api_again(self) -> None:
@@ -162,9 +199,9 @@ class LLMClientTests(unittest.TestCase):
 
     def test_repeated_standalone_lookup_hits_cache_without_second_call(self) -> None:
         cache = {}
-        question = "Em xem học phí ở đâu?"
+        question = "Giải thích vòng lặp Python là gì?"
         answer = llm_client.ask_student(question, [], response_cache=cache)
-        history = [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+        history = [{"role": "user", "content": question}, {"role": "assistant", "content": answer["answer"]}]
         self.assertEqual(llm_client.ask_student(question, history, response_cache=cache), answer)
         self.client.responses.create.assert_called_once()
 
